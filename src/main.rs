@@ -15,6 +15,14 @@
 
 use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context, Result};
+use reqwest::Url;
+
+const USER_AGENT: &str = "locked_titles_convert/1.1.0";
+
+#[derive(serde::Deserialize)]
+struct OEmbedResponse {
+    title: Option<String>,
+}
 
 pub fn main() -> Result<(), anyhow::Error> {
     let exported: serde_json::Value = serde_json::from_reader(std::io::stdin())?;
@@ -42,6 +50,8 @@ pub fn main() -> Result<(), anyhow::Error> {
     let mut internal_user_id = 4;
     let mut internal_vote_id = 0;
 
+    let client = reqwest::blocking::Client::new();
+
     for message in messages {
         if message["author"]["id"].as_str().ok_or(anyhow!("Author ID is not a string"))? != "1167323752363733074" {
             continue;
@@ -52,8 +62,23 @@ pub fn main() -> Result<(), anyhow::Error> {
         let embed = message["embeds"].as_array().ok_or(anyhow!("Embeds field is not an array"))?.get(0).ok_or(anyhow!("Embeds array is empty"))?;
 
         let video_link = embed["url"].as_str().ok_or(anyhow!("URL is not a string"))?;
-        let original_title = embed["title"].as_str().ok_or(anyhow!("Title is not a string"))?;
+        let video_id = &video_link[32..];
+        let mut original_title = embed["title"].as_str().ok_or(anyhow!("Title is not a string"))?;
         let text = embed["description"].as_str().ok_or(anyhow!("Description is not a string"))?;
+
+        let mut temp_string = String::new();
+
+        if original_title.is_empty() || original_title == "Sign in to confirm you’re not a bot" {
+            let url = Url::parse_with_params(
+                "https://www.youtube-nocookie.com/oembed",
+                &[("url", format!("https://youtu.be/{}", video_id))]
+            ).context("Failed to construct an oembed request URL")?;
+            let resp: OEmbedResponse = client.get(url).header("User-Agent", USER_AGENT)
+                .send().context("Failed to send oembed request")?
+                .json().context("Failed to deserialize oembed response")?;
+            temp_string = resp.title.context("oembed response contained no title")?;
+            original_title = &temp_string;
+        }
 
         let mut remaining = text;
         anyhow::ensure!(&remaining[..2] == "**");
@@ -162,7 +187,7 @@ pub fn main() -> Result<(), anyhow::Error> {
         let timestamp = chrono::DateTime::parse_from_str(message["timestamp"].as_str()
             .ok_or(anyhow!("Timestamp field is not a string"))?, "%Y-%m-%dT%H:%M:%S%.f%:z")?.timestamp();
 
-        votes.write_record(&[&internal_vote_id.to_string(), &submitter_internal_user_id.to_string(), &timestamp.to_string(), &video_link[32..],
+        votes.write_record(&[&internal_vote_id.to_string(), &submitter_internal_user_id.to_string(), &timestamp.to_string(), video_id,
             original_title, locked_title, new_title, &locked_votes.to_string(), &new_votes.to_string()])?;
         internal_vote_id += 1;
     }
